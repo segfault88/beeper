@@ -9,7 +9,10 @@ use embassy_time::Timer;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::rmt::{Channel, PulseCode, Rmt, Tx, TxChannelConfig, TxChannelCreator};
+use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::Blocking;
 use esp_radio::ble::controller::BleConnector;
 use log::{info, warn};
 use static_cell::StaticCell;
@@ -60,16 +63,29 @@ fn main() -> ! {
     let connector = BleConnector::new(peripherals.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
+    // WS2812B on GPIO8 (onboard RGB LED on ESP32-C6 DevKitC).
+    // 80 MHz clock / divider 1 = 12.5 ns per tick.
+    let rmt = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).unwrap();
+    let rgb = rmt
+        .channel0
+        .configure_tx(&TxChannelConfig::default().with_clk_divider(1))
+        .unwrap()
+        .with_pin(peripherals.GPIO8);
+
     static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
     let executor = EXECUTOR.init(esp_rtos::embassy::Executor::new());
     executor.run(|spawner| {
-        spawner.spawn(run(led, controller).unwrap());
+        spawner.spawn(run(led, rgb, controller).unwrap());
     });
 }
 
 #[embassy_executor::task]
-async fn run(led: Output<'static>, controller: ExternalController<BleConnector<'static>, 20>) {
-    join(run_ble(controller), led_task(led)).await;
+async fn run(
+    led: Output<'static>,
+    rgb: Channel<'static, Blocking, Tx>,
+    controller: ExternalController<BleConnector<'static>, 20>,
+) {
+    join(run_ble(controller), led_task(led, rgb)).await;
 }
 
 async fn run_ble<C: Controller>(controller: C) {
@@ -173,16 +189,53 @@ async fn gatt_events_task<P: PacketPool>(
     Ok(())
 }
 
-// Waits for BLINK_SIGNAL then toggles the LED every 250 ms for 3 seconds.
-async fn led_task(mut led: Output<'_>) -> ! {
+// Write a single WS2812B pixel. WS2812B uses GRB order.
+// Clock: 80 MHz / divider 1 = 12.5 ns/tick.
+// T0: high 32 ticks (400 ns), low 68 ticks (850 ns).
+// T1: high 64 ticks (800 ns), low 36 ticks (450 ns).
+fn ws2812_write(
+    channel: Channel<'static, Blocking, Tx>,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Channel<'static, Blocking, Tx> {
+    // GRB wire order, MSB first
+    let bits: u32 = ((g as u32) << 16) | ((r as u32) << 8) | (b as u32);
+
+    let mut pulses = [PulseCode::end_marker(); 25]; // 24 data bits + terminator
+    for i in 0..24 {
+        pulses[i] = if (bits >> (23 - i)) & 1 != 0 {
+            PulseCode::new(Level::High, 64, Level::Low, 36) // T1
+        } else {
+            PulseCode::new(Level::High, 32, Level::Low, 68) // T0
+        };
+    }
+
+    match channel.transmit(&pulses) {
+        Ok(tx) => match tx.wait() {
+            Ok(ch) | Err((_, ch)) => ch,
+        },
+        Err((_, ch)) => ch,
+    }
+}
+
+// Dim green when idle; alternates yellow / purple on each GPIO toggle during blink.
+async fn led_task(mut led: Output<'_>, mut rgb: Channel<'static, Blocking, Tx>) -> ! {
+    rgb = ws2812_write(rgb, 0, 8, 0); // dim green — ready
     loop {
         BLINK_SIGNAL.wait().await;
         info!("LED blink start");
-        for _ in 0..12 {
+        for i in 0..12 {
             led.toggle();
+            rgb = if i % 2 == 0 {
+                ws2812_write(rgb, 60, 50, 0) // yellow
+            } else {
+                ws2812_write(rgb, 30, 0, 60) // purple
+            };
             Timer::after_millis(250).await;
         }
         led.set_low();
+        rgb = ws2812_write(rgb, 0, 8, 0); // back to dim green
         info!("LED blink done");
     }
 }

@@ -19,6 +19,7 @@ trouble-host        = { version = "0.6", features = ["default-packet-pool-mtu-25
 log                 = "0.4"
 static_cell         = "2"
 
+
 [profile.release]
 opt-level = "s"
 lto = "thin"
