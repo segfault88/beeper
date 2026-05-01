@@ -1,0 +1,29 @@
+[package]
+name = "beeper-firmware"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+esp-hal             = { version = "1.1", features = ["esp32c6", "unstable"] }
+esp-radio           = { version = "0.18", features = ["esp32c6", "ble", "unstable"] }
+esp-rtos            = { version = "0.3", features = ["esp32c6", "embassy", "esp-alloc", "esp-radio"] }
+esp-backtrace       = { version = "0.18", features = ["esp32c6", "panic-handler", "println"] }
+esp-alloc           = "0.9"
+esp-println         = { version = "0.16", features = ["esp32c6", "log-04"] }
+esp-bootloader-esp-idf = { version = "0.5", features = ["esp32c6"] }
+embassy-executor    = "0.10"
+embassy-time        = "0.5"
+embassy-futures     = "0.1"
+embassy-sync        = "0.7"
+trouble-host        = { version = "0.6", features = ["default-packet-pool-mtu-255"] }
+log                 = "0.4"
+static_cell         = "2"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = "s"
+debug = true
