@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -13,6 +12,7 @@ use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::ble::controller::BleConnector;
 use log::{info, warn};
+use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -32,16 +32,24 @@ struct BeeperServer {
 
 #[gatt_service(uuid = "0000BEEF-0000-1000-8000-00805F9B34FB")]
 struct BeeperService {
-    #[characteristic(uuid = "0000BEE0-0000-1000-8000-00805F9B34FB", write, write_without_response)]
+    #[characteristic(
+        uuid = "0000BEE0-0000-1000-8000-00805F9B34FB",
+        write,
+        write_without_response
+    )]
     trigger: u8,
 }
 
-#[esp_rtos::main]
-async fn main(_s: Spawner) {
+// Sync entry point — heap must be initialized before the Embassy executor starts,
+// because esp_rtos::embassy::Executor::new() allocates BLE OS task stacks via
+// InternalMemory. Using #[esp_rtos::main] hides the executor construction inside
+// the macro and runs it before the async body, so the heap would be uninitialized.
+#[esp_hal::main]
+fn main() -> ! {
+    esp_alloc::heap_allocator!(size: 128 * 1024);
     esp_println::logger::init_logger_from_env();
 
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
-    esp_alloc::heap_allocator!(size: 72 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let software_interrupt =
@@ -49,10 +57,18 @@ async fn main(_s: Spawner) {
     esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
 
     let led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
-
     let connector = BleConnector::new(peripherals.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
+    static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
+    let executor = EXECUTOR.init(esp_rtos::embassy::Executor::new());
+    executor.run(|spawner| {
+        spawner.spawn(run(led, controller).unwrap());
+    });
+}
+
+#[embassy_executor::task]
+async fn run(led: Output<'static>, controller: ExternalController<BleConnector<'static>, 20>) {
     join(run_ble(controller), led_task(led)).await;
 }
 
@@ -79,7 +95,11 @@ async fn run_ble<C: Controller>(controller: C) {
             match advertise(&mut peripheral, &server).await {
                 Ok(conn) => {
                     info!("Central connected");
-                    select(gatt_events_task(&server, &conn), core::future::pending::<()>()).await;
+                    select(
+                        gatt_events_task(&server, &conn),
+                        core::future::pending::<()>(),
+                    )
+                    .await;
                     info!("Central disconnected");
                 }
                 Err(_) => {}
