@@ -31,7 +31,7 @@ class BeeperApp extends StatelessWidget {
     return MaterialApp(
       title: 'Beeper',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepOrange),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
       home: const ScanPage(),
