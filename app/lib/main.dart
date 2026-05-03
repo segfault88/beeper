@@ -10,6 +10,7 @@ import 'package:permission_handler/permission_handler.dart';
 const String kServiceUuid = '0000beef-0000-1000-8000-00805f9b34fb';
 // Must match firmware: characteristic UUID 0xBEE0
 const String kTriggerCharUuid = '0000bee0-0000-1000-8000-00805f9b34fb';
+const String kToggleCharUuid = '0000bee1-0000-1000-8000-00805f9b34fb';
 const String kDeviceName = 'Beeper';
 
 // RSSI to distance: d = 10 ^ ((txPower - rssi) / (10 * n))
@@ -199,10 +200,12 @@ class DevicePage extends StatefulWidget {
 class _DevicePageState extends State<DevicePage> {
   BluetoothConnectionState _connState = BluetoothConnectionState.disconnected;
   BluetoothCharacteristic? _triggerChar;
+  BluetoothCharacteristic? _toggleChar;
   int? _rssi;
   DateTime? _lastSeen;
   bool _blinking = false;
   bool _connecting = false;
+  bool _ledOn = false;
 
   StreamSubscription<BluetoothConnectionState>? _connSub;
   Timer? _rssiTimer;
@@ -254,15 +257,13 @@ class _DevicePageState extends State<DevicePage> {
       if (svc.uuid == Guid(kServiceUuid)) {
         for (final char in svc.characteristics) {
           if (char.uuid == Guid(kTriggerCharUuid)) {
-            if (mounted) {
-              setState(() {
-                _triggerChar = char;
-                _lastSeen = DateTime.now();
-              });
-            }
-            return;
+            if (mounted) setState(() => _triggerChar = char);
+          } else if (char.uuid == Guid(kToggleCharUuid)) {
+            if (mounted) setState(() => _toggleChar = char);
           }
         }
+        if (mounted) setState(() => _lastSeen = DateTime.now());
+        return;
       }
     }
   }
@@ -294,9 +295,24 @@ class _DevicePageState extends State<DevicePage> {
         );
       }
     }
-    // Mirror the 3-second blink duration in the UI
-    await Future.delayed(const Duration(seconds: 3));
+    await Future.delayed(const Duration(seconds: 5));
     if (mounted) setState(() => _blinking = false);
+  }
+
+  Future<void> _toggleLed() async {
+    if (_toggleChar == null) return;
+    final next = !_ledOn;
+    setState(() => _ledOn = next);
+    try {
+      await _toggleChar!.write([next ? 0x01 : 0x00], withoutResponse: true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _ledOn = !next);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Write failed: $e')),
+        );
+      }
+    }
   }
 
   String get _distanceText {
@@ -418,6 +434,17 @@ class _DevicePageState extends State<DevicePage> {
                   : const Icon(Icons.lightbulb),
               label: Text(_blinking ? 'Blinking…' : 'Blink LED'),
               style: FilledButton.styleFrom(
+                minimumSize: const Size.fromHeight(56),
+              ),
+            ),
+
+            const SizedBox(height: 12),
+
+            OutlinedButton.icon(
+              onPressed: ready && _toggleChar != null ? _toggleLed : null,
+              icon: Icon(_ledOn ? Icons.toggle_on : Icons.toggle_off),
+              label: Text(_ledOn ? 'LED On — tap to turn off' : 'LED Off — tap to turn on'),
+              style: OutlinedButton.styleFrom(
                 minimumSize: const Size.fromHeight(56),
               ),
             ),

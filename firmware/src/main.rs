@@ -2,7 +2,7 @@
 #![no_main]
 
 use embassy_futures::join::join;
-use embassy_futures::select::select;
+use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::Timer;
@@ -25,6 +25,7 @@ const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 2;
 
 static BLINK_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static TOGGLE_SIGNAL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 
 // Custom BLE service for the Beeper device.
 // Service UUID 0xBEEF, characteristic UUID 0xBEE0 (write to trigger LED blink).
@@ -41,6 +42,12 @@ struct BeeperService {
         write_without_response
     )]
     trigger: u8,
+    #[characteristic(
+        uuid = "0000BEE1-0000-1000-8000-00805F9B34FB",
+        write,
+        write_without_response
+    )]
+    toggle: u8,
 }
 
 // Sync entry point — heap must be initialized before the Embassy executor starts,
@@ -165,6 +172,7 @@ async fn gatt_events_task<P: PacketPool>(
     conn: &GattConnection<'_, '_, P>,
 ) -> Result<(), Error> {
     let trigger = server.beeper_service.trigger;
+    let toggle = server.beeper_service.toggle;
     loop {
         match conn.next().await {
             GattConnectionEvent::Disconnected { reason } => {
@@ -176,6 +184,10 @@ async fn gatt_events_task<P: PacketPool>(
                     if ev.handle() == trigger.handle {
                         info!("[gatt] trigger write — signalling LED blink");
                         BLINK_SIGNAL.signal(());
+                    } else if ev.handle() == toggle.handle {
+                        let on = ev.data().first().copied().unwrap_or(0) != 0;
+                        info!("[gatt] toggle write — LED {}", if on { "on" } else { "off" });
+                        TOGGLE_SIGNAL.signal(on);
                     }
                 }
                 match event.accept() {
@@ -219,23 +231,43 @@ fn ws2812_write(
     }
 }
 
-// Dim green when idle; alternates yellow / purple on each GPIO toggle during blink.
+// Dim green when idle; bright green when toggled on; alternates yellow/purple during blink.
+// Blink always returns to whatever the current toggle state is.
 async fn led_task(mut led: Output<'_>, mut rgb: Channel<'static, Blocking, Tx>) -> ! {
+    let mut led_on = false;
     rgb = ws2812_write(rgb, 0, 8, 0); // dim green — ready
-    loop {
-        BLINK_SIGNAL.wait().await;
-        info!("LED blink start");
-        for i in 0..12 {
-            led.toggle();
-            rgb = if i % 2 == 0 {
-                ws2812_write(rgb, 60, 50, 0) // yellow
-            } else {
-                ws2812_write(rgb, 30, 0, 60) // purple
-            };
-            Timer::after_millis(250).await;
+
+    let set_idle = |ch: Channel<'static, Blocking, Tx>, on: bool| {
+        if on {
+            ws2812_write(ch, 0, 60, 0) // bright green — toggled on
+        } else {
+            ws2812_write(ch, 0, 8, 0) // dim green — idle
         }
-        led.set_low();
-        rgb = ws2812_write(rgb, 0, 8, 0); // back to dim green
-        info!("LED blink done");
+    };
+
+    loop {
+        match select(BLINK_SIGNAL.wait(), TOGGLE_SIGNAL.wait()).await {
+            Either::First(()) => {
+                info!("LED blink start");
+                // 40 × 125 ms = 5 s, doubled flash rate vs original 12 × 250 ms
+                for i in 0..40 {
+                    led.toggle();
+                    rgb = if i % 2 == 0 {
+                        ws2812_write(rgb, 60, 50, 0) // yellow
+                    } else {
+                        ws2812_write(rgb, 30, 0, 60) // purple
+                    };
+                    Timer::after_millis(125).await;
+                }
+                if led_on { led.set_high() } else { led.set_low() }
+                rgb = set_idle(rgb, led_on);
+                info!("LED blink done");
+            }
+            Either::Second(on) => {
+                led_on = on;
+                if on { led.set_high() } else { led.set_low() }
+                rgb = set_idle(rgb, led_on);
+            }
+        }
     }
 }
