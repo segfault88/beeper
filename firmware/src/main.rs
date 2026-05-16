@@ -66,7 +66,7 @@ fn main() -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
 
-    let led = Output::new(peripherals.GPIO7, Level::Low, OutputConfig::default());
+    let led = Output::new(peripherals.GPIO7, Level::High, OutputConfig::default());
     let connector = BleConnector::new(peripherals.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
@@ -259,13 +259,13 @@ async fn led_task(mut led: Output<'_>, mut rgb: Channel<'static, Blocking, Tx>) 
                     };
                     Timer::after_millis(125).await;
                 }
-                if led_on { led.set_high() } else { led.set_low() }
+                if led_on { led.set_low() } else { led.set_high() }
                 rgb = set_idle(rgb, led_on);
                 info!("LED blink done");
             }
             Either::Second(on) => {
                 led_on = on;
-                if on { led.set_high() } else { led.set_low() }
+                if on { led.set_low() } else { led.set_high() }
                 rgb = set_idle(rgb, led_on);
             }
         }
